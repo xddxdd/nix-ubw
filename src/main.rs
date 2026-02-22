@@ -58,7 +58,7 @@ fn main() -> Result<()> {
     daemon::attach_to_nix_daemons().context("Failed to attach to nix-daemon")?;
 
     info!(
-        "Tracing started — budget: {}. Press Ctrl-C to stop.",
+        "Tracing started - budget: {}. Press Ctrl-C to stop.",
         total_budget
     );
 

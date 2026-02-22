@@ -100,7 +100,7 @@ impl Tracer {
                         }
                         crate::limiter::OnExecResult::Paused => {
                             debug!("[exec] PID {}: {} (paused)", pid, basename);
-                            // Do not call ptrace::cont — process stays stopped.
+                            // Do not call ptrace::cont - process stays stopped.
                             return;
                         }
                         crate::limiter::OnExecResult::NotThrottled => {}

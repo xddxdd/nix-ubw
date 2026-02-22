@@ -9,12 +9,14 @@ use crate::resources::{profile_for, ResourceProfile};
 
 /// Per-PID record of claimed resources.
 struct ActiveEntry {
+    name: String,
     profile: ResourceProfile,
 }
 
 /// A paused process waiting for resources to free up.
 struct PausedEntry {
     pid: Pid,
+    name: String,
     profile: ResourceProfile,
 }
 
@@ -59,16 +61,16 @@ impl Limiter {
     /// of the process in the limiter.
     pub fn on_exec(&mut self, pid: Pid, args: &[String]) -> OnExecResult {
         if let Some(profile) = profile_for(args, &self.total) {
+            let name = args.first().cloned().unwrap_or_else(|| "<unavailable>".into());
             if self.fits(&profile) {
-                self.admit(pid, profile);
+                self.admit(pid, name, profile);
                 OnExecResult::Admitted
             } else {
-
                 info!(
-                    "[limit] PID {} PAUSED — need {}, free: {}, total: {} ({} paused)",
-                    pid, profile, self.free, self.total, self.paused.len() + 1,
+                    "[limit] {} ({}) PAUSED - need {}, free: {}, total: {} ({} paused)",
+                    name, pid, profile, self.free, self.total, self.paused.len() + 1,
                 );
-                self.paused.push_back(PausedEntry { pid, profile });
+                self.paused.push_back(PausedEntry { pid, name, profile });
                 OnExecResult::Paused
             }
         } else {
@@ -82,8 +84,8 @@ impl Limiter {
         if let Some(entry) = self.active.remove(&pid) {
             self.free += entry.profile;
             info!(
-                "[limit] PID {} finished — free: {}, total: {} ({} paused)",
-                pid, self.free, self.total, self.paused.len(),
+                "[limit] {} ({}) finished - free: {}, total: {} ({} paused)",
+                entry.name, pid, self.free, self.total, self.paused.len(),
             );
             self.try_resume_paused();
         }
@@ -97,13 +99,13 @@ impl Limiter {
         self.active.is_empty() || profile.has_free_resources(&self.free)
     }
 
-    fn admit(&mut self, pid: Pid, profile: ResourceProfile) {
+    fn admit(&mut self, pid: Pid, name: String, profile: ResourceProfile) {
         self.free -= profile;
-        self.active.insert(pid, ActiveEntry { profile });
         info!(
-            "[limit] PID {} admitted — free: {}, total: {} ({} paused)",
-            pid, self.free, self.total, self.paused.len(),
+            "[limit] {} ({}) admitted - free: {}, total: {} ({} paused)",
+            name, pid, self.free, self.total, self.paused.len(),
         );
+        self.active.insert(pid, ActiveEntry { name, profile });
     }
 
     fn try_resume_paused(&mut self) {
@@ -115,11 +117,11 @@ impl Limiter {
             }
             let entry = self.paused.pop_front().unwrap();
             info!(
-                "[limit] Resuming PID {} — need {}",
-                entry.pid, entry.profile,
+                "[limit] Resuming {} ({}) - need {}",
+                entry.name, entry.pid, entry.profile,
             );
             let pid = entry.pid;
-            self.admit(pid, entry.profile);
+            self.admit(pid, entry.name, entry.profile);
             if let Err(e) = ptrace::cont(pid, None) {
                 warn!("Failed to resume paused PID {}: {}", pid, e);
                 if let Some(entry) = self.active.remove(&pid) {
