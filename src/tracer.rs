@@ -1,4 +1,4 @@
-use log::{debug, info, warn};
+use log::{debug, warn};
 use nix::libc;
 use nix::sys::ptrace;
 use nix::sys::signal::Signal;
@@ -70,7 +70,7 @@ impl Tracer {
                         let basename = nixutil::read_cmdline(child_pid)
                             .and_then(|a| a.into_iter().next())
                             .unwrap_or_else(|| "<unavailable>".into());
-                        info!("[{}] PID {} -> PID {}: {}", event_name, pid, child_pid, basename);
+                        debug!("[{}] PID {} -> PID {}: {}", event_name, pid, child_pid, basename);
                     }
                     Err(e) => {
                         warn!("Failed to get child PID from {}: {}", pid, e);
@@ -91,7 +91,7 @@ impl Tracer {
                 if let Some(ref a) = args {
                     match self.limiter.on_exec(pid, a) {
                         crate::limiter::OnExecResult::Admitted => {
-                            info!("[exec] PID {}: {} (admitted)", pid, basename);
+                            debug!("[exec] PID {}: {} (admitted)", pid, basename);
                             if let Err(e) = ptrace::cont(pid, None) {
                                 warn!("Failed to continue {} after exec: {}", pid, e);
                                 self.limiter.on_exit(pid);
@@ -99,14 +99,14 @@ impl Tracer {
                             return;
                         }
                         crate::limiter::OnExecResult::Paused => {
-                            info!("[exec] PID {}: {} (paused)", pid, basename);
+                            debug!("[exec] PID {}: {} (paused)", pid, basename);
                             // Do not call ptrace::cont — process stays stopped.
                             return;
                         }
                         crate::limiter::OnExecResult::NotThrottled => {}
                     }
                 }
-                info!("[exec] PID {}: {}", pid, basename);
+                debug!("[exec] PID {}: {}", pid, basename);
                 if let Err(e) = ptrace::cont(pid, None) {
                     warn!("Failed to continue {} after exec: {}", pid, e);
                 }
