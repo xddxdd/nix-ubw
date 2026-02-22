@@ -7,6 +7,7 @@ use nix::unistd::Pid;
 
 use crate::limiter::Limiter;
 use crate::nixutil;
+use crate::resources::ResourceProfile;
 
 /// All state for the tracer.
 pub struct Tracer {
@@ -15,9 +16,9 @@ pub struct Tracer {
 }
 
 impl Tracer {
-    pub fn new(max_concurrent: usize) -> Self {
+    pub fn new(total: ResourceProfile) -> Self {
         Self {
-            limiter: Limiter::new(max_concurrent),
+            limiter: Limiter::new(total),
         }
     }
 
@@ -87,31 +88,27 @@ impl Tracer {
                     .map(|a| a.as_str())
                     .unwrap_or("<unavailable>");
 
-                if args.as_ref().map_or(false, |a| Limiter::is_rate_limited(a)) {
-                    let allowed = self.limiter.on_exec(pid);
-                    if allowed {
-                        info!(
-                            "[exec] PID {}: {} ({} active, {} paused)",
-                            pid, basename,
-                            self.limiter.active_count(),
-                            self.limiter.paused_count()
-                        );
-                        if let Err(e) = ptrace::cont(pid, None) {
-                            warn!("Failed to continue {} after exec: {}", pid, e);
+                if let Some(ref a) = args {
+                    match self.limiter.on_exec(pid, a) {
+                        crate::limiter::OnExecResult::Admitted => {
+                            info!("[exec] PID {}: {} (admitted)", pid, basename);
+                            if let Err(e) = ptrace::cont(pid, None) {
+                                warn!("Failed to continue {} after exec: {}", pid, e);
+                                self.limiter.on_exit(pid);
+                            }
+                            return;
                         }
-                    } else {
-                        info!(
-                            "[exec] PID {}: {} -- PAUSED ({} active, {} paused)",
-                            pid, basename,
-                            self.limiter.active_count(),
-                            self.limiter.paused_count()
-                        );
+                        crate::limiter::OnExecResult::Paused => {
+                            info!("[exec] PID {}: {} (paused)", pid, basename);
+                            // Do not call ptrace::cont — process stays stopped.
+                            return;
+                        }
+                        crate::limiter::OnExecResult::NotThrottled => {}
                     }
-                } else {
-                    info!("[exec] PID {}: {}", pid, basename);
-                    if let Err(e) = ptrace::cont(pid, None) {
-                        warn!("Failed to continue {} after exec: {}", pid, e);
-                    }
+                }
+                info!("[exec] PID {}: {}", pid, basename);
+                if let Err(e) = ptrace::cont(pid, None) {
+                    warn!("Failed to continue {} after exec: {}", pid, e);
                 }
             }
             libc::PTRACE_EVENT_STOP => {

@@ -1,96 +1,125 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashMap;
+use std::collections::VecDeque;
 
 use log::{info, warn};
 use nix::sys::ptrace;
 use nix::unistd::Pid;
 
+use crate::resources::{profile_for, ResourceProfile};
 
+/// Per-PID record of claimed resources.
+struct ActiveEntry {
+    profile: ResourceProfile,
+}
 
-/// Names of executables to rate-limit (matched against basename of argv[0]).
-const RATE_LIMITED: &[&str] = &["sleep"];
+/// A paused process waiting for resources to free up.
+struct PausedEntry {
+    pid: Pid,
+    profile: ResourceProfile,
+}
 
-/// State for concurrency control of rate-limited processes.
+/// Result of the on_exec call.
+pub enum OnExecResult {
+    /// Process is not throttled.
+    NotThrottled,
+    /// Process is throttled and has been admitted.
+    Admitted,
+    /// Process is throttled and has been paused.
+    Paused,
+}
+
+/// Tracks resource consumption of rate-limited processes and pauses new ones
+/// when the budget (CPU cores or memory) is exhausted.
 pub struct Limiter {
-    /// Maximum number of concurrently running rate-limited processes.
-    max_concurrent: usize,
-    /// PIDs of rate-limited processes that are actively running.
-    active: HashSet<Pid>,
-    /// PIDs of rate-limited processes that are paused (waiting for a slot).
-    paused: VecDeque<Pid>,
+    /// Resources held by currently running throttled processes.
+    active: HashMap<Pid, ActiveEntry>,
+    /// Queue of processes waiting for resources.
+    paused: VecDeque<PausedEntry>,
+    /// Currently available (free) resources.
+    free: ResourceProfile,
 }
 
 impl Limiter {
-    pub fn new(max_concurrent: usize) -> Self {
+    pub fn new(total: ResourceProfile) -> Self {
         Self {
-            max_concurrent,
-            active: HashSet::new(),
+            active: HashMap::new(),
             paused: VecDeque::new(),
+            free: total,
         }
     }
 
-    /// Check if a command should be rate-limited based on its argv[0].
-    /// Assumes argv[0] has already been resolved by `read_cmdline`.
-    pub fn is_rate_limited(args: &[String]) -> bool {
-        if let Some(arg0) = args.first() {
-            RATE_LIMITED.iter().any(|&name| arg0 == name)
+    /// Called on exec of a process. If the process is throttled, it is either
+    /// admitted (returns Admitted) or paused (returns Paused). If the process
+    /// is not throttled, it returns NotThrottled.
+    ///
+    /// The resource profile is calculated here and persisted for the lifecycle
+    /// of the process in the limiter.
+    pub fn on_exec(&mut self, pid: Pid, args: &[String]) -> OnExecResult {
+        if let Some(profile) = profile_for(args) {
+            if self.fits(&profile) {
+                self.admit(pid, profile);
+                OnExecResult::Admitted
+            } else {
+                info!(
+                    "[limit] PID {} PAUSED — need {}, have {} free ({} paused)",
+                    pid, profile, self.free, self.paused.len() + 1,
+                );
+                self.paused.push_back(PausedEntry { pid, profile });
+                OnExecResult::Paused
+            }
         } else {
-            false
+            OnExecResult::NotThrottled
         }
     }
 
-    /// Called on exec of a rate-limited process. Returns true if the process
-    /// should be continued, false if it should stay paused.
-    pub fn on_exec(&mut self, pid: Pid) -> bool {
-        if self.active.len() < self.max_concurrent {
-            self.active.insert(pid);
-            true
-        } else {
-            self.paused.push_back(pid);
-            false
-        }
-    }
-
-    /// Called when a process exits. If it was rate-limited, try to resume a paused one.
+    /// Called when any process exits. If it was throttled, free its resources
+    /// and try to resume waiting processes.
     pub fn on_exit(&mut self, pid: Pid) {
-        if self.active.remove(&pid) {
+        if let Some(entry) = self.active.remove(&pid) {
+            self.free += entry.profile;
             info!(
-                "[limit] PID {} finished ({} active, {} paused)",
-                pid,
-                self.active.len(),
-                self.paused.len()
+                "[limit] PID {} finished — {} free ({} paused)",
+                pid, self.free, self.paused.len(),
             );
             self.try_resume_paused();
         }
-        // Also remove from paused in case it exited before being resumed.
-        self.paused.retain(|&p| p != pid);
+        // Remove from paused too in case it exited before being resumed.
+        self.paused.retain(|e| e.pid != pid);
     }
 
-    /// Number of active rate-limited processes.
-    pub fn active_count(&self) -> usize {
-        self.active.len()
+    /// Whether the given profile fits within remaining resources.
+    fn fits(&self, profile: &ResourceProfile) -> bool {
+        profile.has_free_resources(&self.free)
     }
 
-    /// Number of paused rate-limited processes.
-    pub fn paused_count(&self) -> usize {
-        self.paused.len()
+    fn admit(&mut self, pid: Pid, profile: ResourceProfile) {
+        self.free -= profile;
+        self.active.insert(pid, ActiveEntry { profile });
+        info!(
+            "[limit] PID {} admitted — {} free ({} paused)",
+            pid, self.free, self.paused.len(),
+        );
     }
 
     fn try_resume_paused(&mut self) {
-        while self.active.len() < self.max_concurrent {
-            if let Some(pid) = self.paused.pop_front() {
-                info!(
-                    "[limit] Resuming paused PID {} ({} active, {} paused)",
-                    pid,
-                    self.active.len() + 1,
-                    self.paused.len()
-                );
-                self.active.insert(pid);
-                if let Err(e) = ptrace::cont(pid, None) {
-                    warn!("Failed to resume paused PID {}: {}", pid, e);
-                    self.active.remove(&pid);
-                }
-            } else {
+        // Walk the queue front-to-back; stop at the first entry that doesn't
+        // fit (FIFO order preserved).
+        while let Some(front) = self.paused.front() {
+            if !self.fits(&front.profile) {
                 break;
+            }
+            let entry = self.paused.pop_front().unwrap();
+            info!(
+                "[limit] Resuming PID {} — need {}",
+                entry.pid, entry.profile,
+            );
+            let pid = entry.pid;
+            self.admit(pid, entry.profile);
+            if let Err(e) = ptrace::cont(pid, None) {
+                warn!("Failed to resume paused PID {}: {}", pid, e);
+                if let Some(entry) = self.active.remove(&pid) {
+                    self.free += entry.profile;
+                }
             }
         }
     }
