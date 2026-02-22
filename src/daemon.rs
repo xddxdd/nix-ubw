@@ -31,10 +31,7 @@ fn find_nix_daemon_pids() -> Result<Vec<Pid>> {
         };
         let pid = Pid::from_raw(pid);
         if let Some(args) = nixutil::read_cmdline(pid) {
-            if args.len() >= 2
-                && args[0] == "nix-daemon"
-                && args[1] == "--daemon"
-            {
+            if args.len() >= 2 && args[0] == "nix-daemon" && args[1] == "--daemon" {
                 pids.push(pid);
             }
         }

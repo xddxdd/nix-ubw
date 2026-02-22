@@ -61,14 +61,22 @@ impl Limiter {
     /// of the process in the limiter.
     pub fn on_exec(&mut self, pid: Pid, args: &[String]) -> OnExecResult {
         if let Some(profile) = profile_for(args, &self.total) {
-            let name = args.first().cloned().unwrap_or_else(|| "<unavailable>".into());
+            let name = args
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "<unavailable>".into());
             if self.fits(&profile) {
                 self.admit(pid, name, profile);
                 OnExecResult::Admitted
             } else {
                 info!(
                     "[limit] {} ({}) PAUSED - need {}, free: {}, total: {} ({} paused)",
-                    name, pid, profile, self.free, self.total, self.paused.len() + 1,
+                    name,
+                    pid,
+                    profile,
+                    self.free,
+                    self.total,
+                    self.paused.len() + 1,
                 );
                 self.paused.push_back(PausedEntry { pid, name, profile });
                 OnExecResult::Paused
@@ -85,7 +93,11 @@ impl Limiter {
             self.free += entry.profile;
             info!(
                 "[limit] {} ({}) finished - free: {}, total: {} ({} paused)",
-                entry.name, pid, self.free, self.total, self.paused.len(),
+                entry.name,
+                pid,
+                self.free,
+                self.total,
+                self.paused.len(),
             );
             self.try_resume_paused();
         }
@@ -113,7 +125,11 @@ impl Limiter {
         self.free -= profile;
         info!(
             "[limit] {} ({}) admitted - free: {}, total: {} ({} paused)",
-            name, pid, self.free, self.total, self.paused.len(),
+            name,
+            pid,
+            self.free,
+            self.total,
+            self.paused.len(),
         );
         self.active.insert(pid, ActiveEntry { name, profile });
     }

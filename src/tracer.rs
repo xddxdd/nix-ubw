@@ -70,7 +70,10 @@ impl Tracer {
                         let basename = nixutil::read_cmdline(child_pid)
                             .and_then(|a| a.into_iter().next())
                             .unwrap_or_else(|| "<unavailable>".into());
-                        debug!("[{}] PID {} -> PID {}: {}", event_name, pid, child_pid, basename);
+                        debug!(
+                            "[{}] PID {} -> PID {}: {}",
+                            event_name, pid, child_pid, basename
+                        );
                     }
                     Err(e) => {
                         warn!("Failed to get child PID from {}: {}", pid, e);
@@ -124,4 +127,3 @@ impl Tracer {
         }
     }
 }
-
