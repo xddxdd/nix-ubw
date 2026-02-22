@@ -96,7 +96,17 @@ impl Limiter {
     /// Whether the given profile fits within remaining resources.
     /// Failsafe: if nothing else is active, it always fits (deadlock prevention).
     fn fits(&self, profile: &ResourceProfile) -> bool {
-        self.active.is_empty() || profile.has_free_resources(&self.free)
+        if profile.has_free_resources(&self.free) {
+            true
+        } else if self.active.is_empty() {
+            warn!(
+                "[limit] Budget exceeded but no active tasks, force admitting process needing {}",
+                profile
+            );
+            true
+        } else {
+            false
+        }
     }
 
     fn admit(&mut self, pid: Pid, name: String, profile: ResourceProfile) {
