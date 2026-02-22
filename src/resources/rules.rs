@@ -6,15 +6,15 @@ use crate::resources::resource_profile::ResourceProfile;
 ///
 /// Returns `None` if the process has no specific profile and should not be
 /// throttled.
-pub fn profile_for(args: &[String]) -> Option<ResourceProfile> {
+pub fn profile_for(args: &[String], total: &ResourceProfile) -> Option<ResourceProfile> {
     let name = args.first().map(|s| s.as_str())?;
 
     let profile = match name {
         // --- C / C++ compilers ---
         "cc" | "gcc" | "g++" | "c++" | "clang" | "clang++" => ResourceProfile::new(1, 1),
 
-        // --- Rust compiler (parallel codegen, memory-hungry) ---
-        "rustc" => ResourceProfile::new(4, 4),
+        // --- Rust compiler (memory-hungry) ---
+        "rustc" => ResourceProfile::new(1, 4),
 
         // --- LLVM backend / linker ---
         "llc" | "lld" | "ld.lld" => ResourceProfile::new(1, 2),
@@ -33,6 +33,13 @@ pub fn profile_for(args: &[String]) -> Option<ResourceProfile> {
 
         // --- CUDA toolchain (GPU compile, 1 CPU but lots of RAM) ---
         "nvcc" | "ptxas" | "cicc" | "cudafe++" | "fatbinary" => ResourceProfile::new(1, 4),
+
+        // --- Compression / Decompression (Single-threaded baseline) ---
+        "gzip" | "gunzip" | "xz" | "unxz" | "bzip2" | "bunzip2" | "zstd" | "unzstd" | "zip"
+        | "unzip" | "tar" => ResourceProfile::new(1, 1),
+
+        // --- Parallel Compressors (Scales to budget) ---
+        "pigz" | "7z" | "7za" | "pixz" => ResourceProfile::new(total.cpus, 1),
 
         // Everything else (orchestrators, wrappers, etc.) is not throttled.
         _ => return None,

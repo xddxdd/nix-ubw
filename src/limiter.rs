@@ -31,6 +31,8 @@ pub enum OnExecResult {
 /// Tracks resource consumption of rate-limited processes and pauses new ones
 /// when the budget (CPU cores or memory) is exhausted.
 pub struct Limiter {
+    /// Total resource budget.
+    total: ResourceProfile,
     /// Resources held by currently running throttled processes.
     active: HashMap<Pid, ActiveEntry>,
     /// Queue of processes waiting for resources.
@@ -42,6 +44,7 @@ pub struct Limiter {
 impl Limiter {
     pub fn new(total: ResourceProfile) -> Self {
         Self {
+            total,
             active: HashMap::new(),
             paused: VecDeque::new(),
             free: total,
@@ -55,14 +58,15 @@ impl Limiter {
     /// The resource profile is calculated here and persisted for the lifecycle
     /// of the process in the limiter.
     pub fn on_exec(&mut self, pid: Pid, args: &[String]) -> OnExecResult {
-        if let Some(profile) = profile_for(args) {
+        if let Some(profile) = profile_for(args, &self.total) {
             if self.fits(&profile) {
                 self.admit(pid, profile);
                 OnExecResult::Admitted
             } else {
+
                 info!(
-                    "[limit] PID {} PAUSED — need {}, have {} free ({} paused)",
-                    pid, profile, self.free, self.paused.len() + 1,
+                    "[limit] PID {} PAUSED — need {}, free: {}, total: {} ({} paused)",
+                    pid, profile, self.free, self.total, self.paused.len() + 1,
                 );
                 self.paused.push_back(PausedEntry { pid, profile });
                 OnExecResult::Paused
@@ -78,8 +82,8 @@ impl Limiter {
         if let Some(entry) = self.active.remove(&pid) {
             self.free += entry.profile;
             info!(
-                "[limit] PID {} finished — {} free ({} paused)",
-                pid, self.free, self.paused.len(),
+                "[limit] PID {} finished — free: {}, total: {} ({} paused)",
+                pid, self.free, self.total, self.paused.len(),
             );
             self.try_resume_paused();
         }
@@ -88,16 +92,17 @@ impl Limiter {
     }
 
     /// Whether the given profile fits within remaining resources.
+    /// Failsafe: if nothing else is active, it always fits (deadlock prevention).
     fn fits(&self, profile: &ResourceProfile) -> bool {
-        profile.has_free_resources(&self.free)
+        self.active.is_empty() || profile.has_free_resources(&self.free)
     }
 
     fn admit(&mut self, pid: Pid, profile: ResourceProfile) {
         self.free -= profile;
         self.active.insert(pid, ActiveEntry { profile });
         info!(
-            "[limit] PID {} admitted — {} free ({} paused)",
-            pid, self.free, self.paused.len(),
+            "[limit] PID {} admitted — free: {}, total: {} ({} paused)",
+            pid, self.free, self.total, self.paused.len(),
         );
     }
 
