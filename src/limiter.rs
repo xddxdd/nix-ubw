@@ -28,11 +28,11 @@ impl Limiter {
         }
     }
 
-    /// Check if a command should be rate-limited based on its argv[0] basename.
+    /// Check if a command should be rate-limited based on its argv[0].
+    /// Assumes argv[0] has already been resolved by `read_cmdline`.
     pub fn is_rate_limited(args: &[String]) -> bool {
         if let Some(arg0) = args.first() {
-            let resolved = crate::nixutil::resolve_basename(arg0);
-            RATE_LIMITED.iter().any(|&name| resolved == name)
+            RATE_LIMITED.iter().any(|&name| arg0 == name)
         } else {
             false
         }

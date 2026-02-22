@@ -1,3 +1,24 @@
+use std::fs;
+
+use nix::unistd::Pid;
+
+/// Read /proc/<pid>/cmdline and return the arguments as a Vec<String>.
+/// The first argument (argv[0]) is automatically resolved to its unwrapped
+/// basename via `resolve_basename`.
+pub fn read_cmdline(pid: Pid) -> Option<Vec<String>> {
+    let path = format!("/proc/{}/cmdline", pid);
+    let data = fs::read(&path).ok()?;
+    let mut args: Vec<String> = data
+        .split(|&b| b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| String::from_utf8_lossy(s).into_owned())
+        .collect();
+    if let Some(first) = args.first_mut() {
+        *first = resolve_basename(first).to_owned();
+    }
+    Some(args)
+}
+
 /// Unwrap a NixOS-wrapped executable name by stripping matched pairs of
 /// leading `.` and trailing `-wrapped`.
 ///
@@ -9,7 +30,7 @@
 /// Names without matching pairs are left unchanged:
 /// - `.hidden-file` → `.hidden-file`
 /// - `gcc-wrapped` (no leading `.`) → `gcc-wrapped`
-pub fn unwrap_nix_name(name: &str) -> &str {
+fn unwrap_nix_name(name: &str) -> &str {
     let mut name = name;
     while let Some(stripped) = name.strip_suffix("-wrapped") {
         if let Some(stripped) = stripped.strip_prefix('.') {
@@ -22,7 +43,7 @@ pub fn unwrap_nix_name(name: &str) -> &str {
 }
 
 /// Extract the basename from a path and unwrap NixOS wrapper names.
-pub fn resolve_basename(path: &str) -> &str {
+fn resolve_basename(path: &str) -> &str {
     let basename = path.rsplit('/').next().unwrap_or(path);
     unwrap_nix_name(basename)
 }

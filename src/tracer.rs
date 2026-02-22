@@ -1,6 +1,3 @@
-use std::collections::HashSet;
-use std::fs;
-
 use log::{debug, info, warn};
 use nix::libc;
 use nix::sys::ptrace;
@@ -9,11 +6,10 @@ use nix::sys::wait::WaitStatus;
 use nix::unistd::Pid;
 
 use crate::limiter::Limiter;
+use crate::nixutil;
 
 /// All state for the tracer.
 pub struct Tracer {
-    /// All PIDs we are currently tracing.
-    pub traced: HashSet<Pid>,
     /// Concurrency limiter for rate-limited processes.
     pub limiter: Limiter,
 }
@@ -21,7 +17,6 @@ pub struct Tracer {
 impl Tracer {
     pub fn new(max_concurrent: usize) -> Self {
         Self {
-            traced: HashSet::new(),
             limiter: Limiter::new(max_concurrent),
         }
     }
@@ -43,13 +38,11 @@ impl Tracer {
                 }
             }
             WaitStatus::Exited(pid, code) => {
-                info!("[exit] PID {} exited with code {}", pid, code);
-                self.traced.remove(&pid);
+                debug!("[exit] PID {} exited with code {}", pid, code);
                 self.limiter.on_exit(pid);
             }
             WaitStatus::Signaled(pid, sig, _core) => {
-                info!("[exit] PID {} killed by {:?}", pid, sig);
-                self.traced.remove(&pid);
+                debug!("[exit] PID {} killed by {:?}", pid, sig);
                 self.limiter.on_exit(pid);
             }
             other => {
@@ -73,11 +66,10 @@ impl Tracer {
                             libc::PTRACE_EVENT_CLONE => "clone",
                             _ => unreachable!(),
                         };
-                        let cmdline = read_cmdline(child_pid)
-                            .map(|args| shell_join(&args))
+                        let basename = nixutil::read_cmdline(child_pid)
+                            .and_then(|a| a.into_iter().next())
                             .unwrap_or_else(|| "<unavailable>".into());
-                        info!("[{}] PID {} -> PID {}: {}", event_name, pid, child_pid, cmdline);
-                        self.traced.insert(child_pid);
+                        info!("[{}] PID {} -> PID {}: {}", event_name, pid, child_pid, basename);
                     }
                     Err(e) => {
                         warn!("Failed to get child PID from {}: {}", pid, e);
@@ -88,18 +80,19 @@ impl Tracer {
                 }
             }
             libc::PTRACE_EVENT_EXEC => {
-                let args = read_cmdline(pid);
-                let cmdline = args
+                let args = nixutil::read_cmdline(pid);
+                let basename = args
                     .as_ref()
-                    .map(|a| shell_join(a))
-                    .unwrap_or_else(|| "<unavailable>".into());
+                    .and_then(|a| a.first())
+                    .map(|a| a.as_str())
+                    .unwrap_or("<unavailable>");
 
                 if args.as_ref().map_or(false, |a| Limiter::is_rate_limited(a)) {
                     let allowed = self.limiter.on_exec(pid);
                     if allowed {
                         info!(
                             "[exec] PID {}: {} ({} active, {} paused)",
-                            pid, cmdline,
+                            pid, basename,
                             self.limiter.active_count(),
                             self.limiter.paused_count()
                         );
@@ -109,13 +102,13 @@ impl Tracer {
                     } else {
                         info!(
                             "[exec] PID {}: {} -- PAUSED ({} active, {} paused)",
-                            pid, cmdline,
+                            pid, basename,
                             self.limiter.active_count(),
                             self.limiter.paused_count()
                         );
                     }
                 } else {
-                    info!("[exec] PID {}: {}", pid, cmdline);
+                    info!("[exec] PID {}: {}", pid, basename);
                     if let Err(e) = ptrace::cont(pid, None) {
                         warn!("Failed to continue {} after exec: {}", pid, e);
                     }
@@ -135,28 +128,3 @@ impl Tracer {
     }
 }
 
-/// Read /proc/<pid>/cmdline and return the arguments as a Vec<String>.
-pub fn read_cmdline(pid: Pid) -> Option<Vec<String>> {
-    let path = format!("/proc/{}/cmdline", pid);
-    let data = fs::read(&path).ok()?;
-    let args: Vec<String> = data
-        .split(|&b| b == 0)
-        .filter(|s| !s.is_empty())
-        .map(|s| String::from_utf8_lossy(s).into_owned())
-        .collect();
-    Some(args)
-}
-
-/// Join args into a shell-like representation for logging.
-fn shell_join(args: &[String]) -> String {
-    args.iter()
-        .map(|a| {
-            if a.contains(' ') || a.contains('\'') || a.contains('"') || a.is_empty() {
-                format!("'{}'", a.replace('\'', "'\\''"))
-            } else {
-                a.clone()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
