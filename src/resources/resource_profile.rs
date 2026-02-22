@@ -5,13 +5,13 @@ use std::ops::{Add, AddAssign, Sub, SubAssign};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResourceProfile {
     /// Number of CPU cores this process consumes.
-    pub cpus: u32,
+    pub cpus: i32,
     /// Memory this process consumes in GiB.
-    pub mem_gb: u32,
+    pub mem_gb: i32,
 }
 
 impl ResourceProfile {
-    pub const fn new(cpus: u32, mem_gb: u32) -> Self {
+    pub const fn new(cpus: i32, mem_gb: i32) -> Self {
         Self { cpus, mem_gb }
     }
 
@@ -47,8 +47,8 @@ impl Sub for ResourceProfile {
     type Output = Self;
     fn sub(self, other: Self) -> Self {
         Self {
-            cpus: self.cpus.saturating_sub(other.cpus),
-            mem_gb: self.mem_gb.saturating_sub(other.mem_gb),
+            cpus: self.cpus - other.cpus,
+            mem_gb: self.mem_gb - other.mem_gb,
         }
     }
 }

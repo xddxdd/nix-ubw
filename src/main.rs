@@ -20,28 +20,28 @@ use tracer::Tracer;
 struct Args {
     /// Total CPU cores available for throttled processes [default: system core count].
     #[arg(short = 'c', long, default_value_t = default_cpus())]
-    total_cpus: u32,
+    total_cpus: i32,
 
     /// Total memory in GiB available for throttled processes [default: system RAM, rounded down].
     #[arg(short = 'm', long, default_value_t = default_mem_gb())]
-    total_mem_gb: u32,
+    total_mem_gb: i32,
 }
 
-fn default_cpus() -> u32 {
+fn default_cpus() -> i32 {
     std::thread::available_parallelism()
-        .map(|n| n.get() as u32)
+        .map(|n| n.get() as i32)
         .unwrap_or(4)
 }
 
 /// Read total system RAM from /proc/meminfo, returned in GiB (rounded down).
-fn default_mem_gb() -> u32 {
-    (|| -> Option<u32> {
+fn default_mem_gb() -> i32 {
+    (|| -> Option<i32> {
         let data = fs::read_to_string("/proc/meminfo").ok()?;
         for line in data.lines() {
             if let Some(rest) = line.strip_prefix("MemTotal:") {
                 // Format: "MemTotal:    16348160 kB"
                 let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
-                return Some((kb / (1024 * 1024)) as u32);
+                return Some((kb / (1024 * 1024)) as i32);
             }
         }
         None
