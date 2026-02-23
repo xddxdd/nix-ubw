@@ -157,3 +157,96 @@ impl Limiter {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nix::unistd::Pid;
+
+    #[test]
+    fn test_not_throttled() {
+        let mut limiter = Limiter::new(ResourceProfile::new(2, 2));
+        let res = limiter.on_exec(Pid::from_raw(100), &["some_random_process".into()]);
+        assert!(matches!(res, OnExecResult::NotThrottled));
+        assert!(limiter.active.is_empty());
+        assert!(limiter.paused.is_empty());
+        assert_eq!(limiter.free, ResourceProfile::new(2, 2));
+    }
+
+    #[test]
+    fn test_admit_and_pause() {
+        let mut limiter = Limiter::new(ResourceProfile::new(2, 2));
+
+        // cc needs (1, 1). Normally fits.
+        let res1 = limiter.on_exec(Pid::from_raw(100), &["cc".into()]);
+        assert!(matches!(res1, OnExecResult::Admitted));
+        assert_eq!(limiter.active.len(), 1);
+        assert_eq!(limiter.free, ResourceProfile::new(1, 1));
+
+        // another cc fits.
+        let res2 = limiter.on_exec(Pid::from_raw(101), &["cc".into()]);
+        assert!(matches!(res2, OnExecResult::Admitted));
+        assert_eq!(limiter.active.len(), 2);
+        assert_eq!(limiter.free, ResourceProfile::new(0, 0));
+
+        // third cc pauses.
+        let res3 = limiter.on_exec(Pid::from_raw(102), &["cc".into()]);
+        assert!(matches!(res3, OnExecResult::Paused));
+        assert_eq!(limiter.active.len(), 2);
+        assert_eq!(limiter.paused.len(), 1);
+        assert_eq!(limiter.free, ResourceProfile::new(0, 0));
+    }
+
+    #[test]
+    fn test_force_admit() {
+        let mut limiter = Limiter::new(ResourceProfile::new(1, 1));
+
+        // rustc needs (1, 4). > (1, 1).
+        // normally it would be paused, but since active is empty, it force admits.
+        let res1 = limiter.on_exec(Pid::from_raw(100), &["rustc".into()]);
+        assert!(matches!(res1, OnExecResult::Admitted));
+        assert_eq!(limiter.active.len(), 1);
+        assert_eq!(limiter.free, ResourceProfile::new(0, -3));
+
+        // a second rustc should pause because active is no longer empty.
+        let res2 = limiter.on_exec(Pid::from_raw(101), &["rustc".into()]);
+        assert!(matches!(res2, OnExecResult::Paused));
+        assert_eq!(limiter.active.len(), 1);
+        assert_eq!(limiter.paused.len(), 1);
+        assert_eq!(limiter.free, ResourceProfile::new(0, -3));
+
+        limiter.on_exit(Pid::from_raw(100));
+
+        // PID 100 exits, so its resources (1, 4) are freed, making free (1, 1).
+        // It pops PID 101 to force admit, but ptrace::cont fails in unit tests,
+        // so it cleans up PID 101 from active and frees its resources as well.
+        assert_eq!(limiter.active.len(), 0);
+        assert_eq!(limiter.paused.len(), 0);
+        assert_eq!(limiter.free, ResourceProfile::new(1, 1));
+    }
+
+    #[test]
+    fn test_on_exit() {
+        let mut limiter = Limiter::new(ResourceProfile::new(2, 2));
+
+        limiter.on_exec(Pid::from_raw(100), &["cc".into()]); // admits, free (1, 1)
+        limiter.on_exec(Pid::from_raw(101), &["cc".into()]); // admits, free (0, 0)
+        limiter.on_exec(Pid::from_raw(102), &["cc".into()]); // pauses
+        limiter.on_exec(Pid::from_raw(103), &["cc".into()]); // pauses
+
+        assert_eq!(limiter.active.len(), 2);
+        assert_eq!(limiter.paused.len(), 2);
+        assert_eq!(limiter.free, ResourceProfile::new(0, 0));
+
+        limiter.on_exit(Pid::from_raw(100));
+
+        // Since 100 exits, free becomes (1, 1).
+        // try_resume_paused pops 102 and calls ptrace::cont which fails (no such process).
+        // It's then removed from active, making free (1, 1) again.
+        // Then it pops 103, same thing happens.
+        // Finally paused is empty and active only has 101.
+        assert_eq!(limiter.active.len(), 1);
+        assert_eq!(limiter.paused.len(), 0);
+        assert_eq!(limiter.free, ResourceProfile::new(1, 1));
+    }
+}
