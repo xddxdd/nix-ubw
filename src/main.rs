@@ -30,7 +30,7 @@ struct Args {
 fn default_cpus() -> i32 {
     std::thread::available_parallelism()
         .map(|n| n.get() as i32)
-        .unwrap_or(4)
+        .expect("failed to get default CPU count")
 }
 
 /// Read total system RAM from /proc/meminfo, returned in GiB (rounded down).
@@ -46,7 +46,7 @@ fn default_mem_gb() -> i32 {
         }
         None
     })()
-    .unwrap_or(8)
+    .expect("failed to get default total memory")
 }
 
 fn main() -> Result<()> {
