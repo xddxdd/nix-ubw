@@ -1,5 +1,7 @@
 # Nix-UBW (Unlimited Build Works)
 
+> **EXPERIMENTAL**. Might not have performance benefits due to ptrace overhead.
+
 Orchestrates resource heavy processes from your Nix builds, so you can run **unlimited(*)** large **builds** in parallel, and they just **work** without resource contention and/or out-of-memory errors.
 
 > (*) Within reason for Linux's scheduler to handle.
