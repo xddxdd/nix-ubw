@@ -18,7 +18,7 @@ pub struct Tracer {
 impl Tracer {
     pub fn new(total: ResourceProfile) -> Self {
         Self {
-            limiter: Limiter::new(total),
+            limiter: Limiter::new(total, false),
         }
     }
 
@@ -93,16 +93,8 @@ impl Tracer {
 
                 if let Some(ref a) = args {
                     match self.limiter.on_exec(pid, a) {
-                        crate::limiter::OnExecResult::Admitted => {
-                            debug!("[exec] PID {}: {} (admitted)", pid, basename);
-                            if let Err(e) = ptrace::cont(pid, None) {
-                                warn!("Failed to continue {} after exec: {}", pid, e);
-                                self.limiter.on_exit(pid);
-                            }
-                            return;
-                        }
-                        crate::limiter::OnExecResult::Paused => {
-                            debug!("[exec] PID {}: {} (paused)", pid, basename);
+                        crate::limiter::OnExecResult::Throttled => {
+                            debug!("[exec] PID {}: {} (throttled)", pid, basename);
                             // Do not call ptrace::cont - process stays stopped.
                             return;
                         }

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 
+use log::debug;
 use log::{info, warn};
 use nix::sys::ptrace;
 use nix::unistd::Pid;
@@ -24,10 +25,8 @@ struct PausedEntry {
 pub enum OnExecResult {
     /// Process is not throttled.
     NotThrottled,
-    /// Process is throttled and has been admitted.
-    Admitted,
-    /// Process is throttled and has been paused.
-    Paused,
+    /// Process might be throttled.
+    Throttled,
 }
 
 /// Tracks resource consumption of rate-limited processes and pauses new ones
@@ -41,21 +40,22 @@ pub struct Limiter {
     paused: VecDeque<PausedEntry>,
     /// Currently available (free) resources.
     free: ResourceProfile,
+    /// Whether running in unit test and do not perform actual ptrace::cont operations.
+    unit_test: bool,
 }
 
 impl Limiter {
-    pub fn new(total: ResourceProfile) -> Self {
+    pub fn new(total: ResourceProfile, unit_test: bool) -> Self {
         Self {
             total,
             active: HashMap::new(),
             paused: VecDeque::new(),
             free: total,
+            unit_test: unit_test,
         }
     }
 
-    /// Called on exec of a process. If the process is throttled, it is either
-    /// admitted (returns Admitted) or paused (returns Paused). If the process
-    /// is not throttled, it returns NotThrottled.
+    /// Called on exec of a process. Returns Throttled or NotThrottled.
     ///
     /// The resource profile is calculated here and persisted for the lifecycle
     /// of the process in the limiter.
@@ -65,22 +65,18 @@ impl Limiter {
                 .first()
                 .cloned()
                 .unwrap_or_else(|| "<unavailable>".into());
-            if self.fits(&profile) {
-                self.admit(pid, name, profile);
-                OnExecResult::Admitted
-            } else {
-                info!(
-                    "[limit] {} ({}) PAUSED - need {}, free: {}, total: {} ({} paused)",
-                    name,
-                    pid,
-                    profile,
-                    self.free,
-                    self.total,
-                    self.paused.len() + 1,
-                );
-                self.paused.push_back(PausedEntry { pid, name, profile });
-                OnExecResult::Paused
-            }
+            info!(
+                "[limit] {} ({}) PAUSED - need {}, free: {}, total: {} ({} paused)",
+                name,
+                pid,
+                profile,
+                self.free,
+                self.total,
+                self.paused.len() + 1,
+            );
+            self.paused.push_back(PausedEntry { pid, name, profile });
+            self.try_resume_paused();
+            OnExecResult::Throttled
         } else {
             OnExecResult::NotThrottled
         }
@@ -142,18 +138,26 @@ impl Limiter {
                 break;
             }
             let entry = self.paused.pop_front().unwrap();
-            info!(
+            debug!(
                 "[limit] Resuming {} ({}) - need {}",
                 entry.name, entry.pid, entry.profile,
             );
             let pid = entry.pid;
             self.admit(pid, entry.name, entry.profile);
-            if let Err(e) = ptrace::cont(pid, None) {
+            if let Err(e) = self.cont(pid) {
                 warn!("Failed to resume paused PID {}: {}", pid, e);
                 if let Some(entry) = self.active.remove(&pid) {
                     self.free += entry.profile;
                 }
             }
+        }
+    }
+
+    fn cont(&self, pid: Pid) -> nix::Result<()> {
+        if self.unit_test {
+            Ok(())
+        } else {
+            ptrace::cont(pid, None)
         }
     }
 }
@@ -165,7 +169,7 @@ mod tests {
 
     #[test]
     fn test_not_throttled() {
-        let mut limiter = Limiter::new(ResourceProfile::new(2, 2));
+        let mut limiter = Limiter::new(ResourceProfile::new(2, 2), true);
         let res = limiter.on_exec(Pid::from_raw(100), &["some_random_process".into()]);
         assert!(matches!(res, OnExecResult::NotThrottled));
         assert!(limiter.active.is_empty());
@@ -175,23 +179,23 @@ mod tests {
 
     #[test]
     fn test_admit_and_pause() {
-        let mut limiter = Limiter::new(ResourceProfile::new(2, 2));
+        let mut limiter = Limiter::new(ResourceProfile::new(2, 2), true);
 
         // cc needs (1, 1). Normally fits.
         let res1 = limiter.on_exec(Pid::from_raw(100), &["cc".into()]);
-        assert!(matches!(res1, OnExecResult::Admitted));
+        assert!(matches!(res1, OnExecResult::Throttled));
         assert_eq!(limiter.active.len(), 1);
         assert_eq!(limiter.free, ResourceProfile::new(1, 1));
 
         // another cc fits.
         let res2 = limiter.on_exec(Pid::from_raw(101), &["cc".into()]);
-        assert!(matches!(res2, OnExecResult::Admitted));
+        assert!(matches!(res2, OnExecResult::Throttled));
         assert_eq!(limiter.active.len(), 2);
         assert_eq!(limiter.free, ResourceProfile::new(0, 0));
 
         // third cc pauses.
         let res3 = limiter.on_exec(Pid::from_raw(102), &["cc".into()]);
-        assert!(matches!(res3, OnExecResult::Paused));
+        assert!(matches!(res3, OnExecResult::Throttled));
         assert_eq!(limiter.active.len(), 2);
         assert_eq!(limiter.paused.len(), 1);
         assert_eq!(limiter.free, ResourceProfile::new(0, 0));
@@ -199,35 +203,35 @@ mod tests {
 
     #[test]
     fn test_force_admit() {
-        let mut limiter = Limiter::new(ResourceProfile::new(1, 1));
+        let mut limiter = Limiter::new(ResourceProfile::new(1, 1), true);
 
         // rustc needs (1, 4). > (1, 1).
         // normally it would be paused, but since active is empty, it force admits.
         let res1 = limiter.on_exec(Pid::from_raw(100), &["rustc".into()]);
-        assert!(matches!(res1, OnExecResult::Admitted));
+        assert!(matches!(res1, OnExecResult::Throttled));
         assert_eq!(limiter.active.len(), 1);
         assert_eq!(limiter.free, ResourceProfile::new(0, -3));
 
         // a second rustc should pause because active is no longer empty.
         let res2 = limiter.on_exec(Pid::from_raw(101), &["rustc".into()]);
-        assert!(matches!(res2, OnExecResult::Paused));
+        assert!(matches!(res2, OnExecResult::Throttled));
         assert_eq!(limiter.active.len(), 1);
         assert_eq!(limiter.paused.len(), 1);
         assert_eq!(limiter.free, ResourceProfile::new(0, -3));
 
         limiter.on_exit(Pid::from_raw(100));
 
-        // PID 100 exits, so its resources (1, 4) are freed, making free (1, 1).
-        // It pops PID 101 to force admit, but ptrace::cont fails in unit tests,
-        // so it cleans up PID 101 from active and frees its resources as well.
-        assert_eq!(limiter.active.len(), 0);
+        // PID 100 exits, freeing its resources (1, 4) so free becomes (1, 1).
+        // try_resume_paused pops PID 101 and force-admits it (active was empty).
+        // cont() succeeds in unit-test mode, so PID 101 stays in active.
+        assert_eq!(limiter.active.len(), 1);
         assert_eq!(limiter.paused.len(), 0);
-        assert_eq!(limiter.free, ResourceProfile::new(1, 1));
+        assert_eq!(limiter.free, ResourceProfile::new(0, -3));
     }
 
     #[test]
     fn test_on_exit() {
-        let mut limiter = Limiter::new(ResourceProfile::new(2, 2));
+        let mut limiter = Limiter::new(ResourceProfile::new(2, 2), true);
 
         limiter.on_exec(Pid::from_raw(100), &["cc".into()]); // admits, free (1, 1)
         limiter.on_exec(Pid::from_raw(101), &["cc".into()]); // admits, free (0, 0)
@@ -241,12 +245,10 @@ mod tests {
         limiter.on_exit(Pid::from_raw(100));
 
         // Since 100 exits, free becomes (1, 1).
-        // try_resume_paused pops 102 and calls ptrace::cont which fails (no such process).
-        // It's then removed from active, making free (1, 1) again.
-        // Then it pops 103, same thing happens.
-        // Finally paused is empty and active only has 101.
-        assert_eq!(limiter.active.len(), 1);
-        assert_eq!(limiter.paused.len(), 0);
-        assert_eq!(limiter.free, ResourceProfile::new(1, 1));
+        // try_resume_paused pops 102 (fits), admits it, cont() succeeds -> stays in active.
+        // free is now (0, 0). PID 103 doesn't fit, stays paused.
+        assert_eq!(limiter.active.len(), 2);
+        assert_eq!(limiter.paused.len(), 1);
+        assert_eq!(limiter.free, ResourceProfile::new(0, 0));
     }
 }

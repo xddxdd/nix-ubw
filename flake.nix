@@ -27,6 +27,20 @@
 
             RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
           };
+
+          packages.parallel-test =
+            let
+              value = "test2";
+            in
+            pkgs.runCommand "parallel" { nativeBuildInputs = [ pkgs.parallel ]; } ''
+              mkdir -p $out
+
+              for i in $(seq 1 100); do
+                echo "sleep 5; echo ${value} > $out/$i.txt" >> job.txt
+              done
+
+              cat job.txt | parallel -j50
+            '';
         };
     };
 }
